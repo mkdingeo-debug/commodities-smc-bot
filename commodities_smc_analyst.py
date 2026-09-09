@@ -1,24 +1,35 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-NATHANIEL RIDGE — RIDGECREST COMMODITIES | ANALISTA SMC/ICT (vía Bybit)
+NATHANIEL RIDGE — RIDGECREST COMMODITIES | ANALISTA SMC/ICT (vía Bitget)
 ================================================================================
 Asistente de análisis técnico (NO ejecuta órdenes, NO gestiona fondos) basado
 en metodología Smart Money Concepts (SMC) + Price Action + ICT, aplicado a
-contratos "linear" de materias primas listados en Bybit (ej. XAUUSDT = oro,
-CLUSDT = petróleo WTI) — la MISMA API pública que ya usa el bot de
-criptomonedas, sin necesidad de cuenta ni API key de terceros, sin límite de
-llamadas por día, y con velas completas (OHLC) para el análisis SMC/ICT real.
+contratos perpetuos "USDT-FUTURES" de materias primas listados en Bitget
+(ej. XAUUSDT = oro, CLUSDT = petróleo WTI, NATGASUSDT = gas natural) —
+API pública, sin necesidad de cuenta ni API key, sin límite de llamadas
+relevante para este uso, y con velas completas (OHLC) para el análisis
+SMC/ICT real.
+
+Se eligió Bitget (en vez de Bybit, que usa el bot de cripto) porque tiene la
+mayor cantidad de materias primas listadas como perpetuo USDT-M de todas las
+casas de cripto (gas, petróleo WTI, petróleo Brent, metales preciosos,
+metales industriales), lo que permite ofrecer un "Top 10" real de materias
+primas en vez de las 3 que da Bybit.
 
 IMPORTANTE: no todos los símbolos candidatos en SYMBOLS están garantizados —
-Bybit solo lista como contrato "linear" un subconjunto de materias primas
-(oro y petróleo confirmados; el resto son candidatos a probar en vivo). El
-bot salta automáticamente cualquier símbolo que no exista, sin afectar a los
-demás — revisa los Logs de Render para ver cuáles funcionan.
+Bitget confirma oficialmente petróleo WTI (CLUSDT), petróleo Brent (BZUSDT),
+gas natural (NATGASUSDT) y oro (XAUUSDT); plata, platino, paladio, cobre,
+café y trigo son candidatos razonables (Bitget los agrupa como "metales
+preciosos" y "agrícolas" en su documentación, pero sin confirmar el símbolo
+exacto de cada uno). El bot salta automáticamente cualquier símbolo que no
+exista, sin afectar a los demás — revisa los Logs de Render para ver cuáles
+funcionan realmente.
 
-Como Bybit bloquea solicitudes desde IPs de EE. UU., este bot DEBE
-desplegarse en una región de Render fuera de EE. UU. (Frankfurt o Singapore),
-igual que se hizo con el bot de cripto.
+Bitget bloquea el acceso desde IPs de EE. UU. (igual que Bybit), así que este
+bot DEBE desplegarse en la misma región de Render que ya usan los otros 3
+bots (fuera de EE. UU., p. ej. Frankfurt). Si en los Logs aparece un error
+de tipo "geo-restricted" o similar, puede ser necesario cambiar de región.
 
 ------------------------------------------------------------------------------
 AVISO IMPORTANTE / DISCLAIMER
@@ -35,11 +46,11 @@ Requisitos:
     pip install requests pandas numpy
 
 Uso básico:
-    python commodities_smc_analyst.py --interval 60 --limit 300
+    python commodities_smc_analyst.py --interval 1H --limit 300
 
 Variables de entorno:
-    export SYMBOLS="XAUUSDT,XAGUSDT,CLUSDT,XPTUSDT,XPDUSDT,NATGASUSDT,XCUUSDT"
-    export BYBIT_CATEGORY="linear"
+    export SYMBOLS="XAUUSDT,XAGUSDT,XPTUSDT,XPDUSDT,XCUUSDT,CLUSDT,BZUSDT,NATGASUSDT,COFFEEUSDT,WHEATUSDT"
+    export BITGET_PRODUCT_TYPE="usdt-futures"
     export SWING_ORDER=4
     export OB_LOOKBACK=8
     export LIQUIDITY_TOLERANCE_PCT=0.05
@@ -51,7 +62,7 @@ Variables de entorno:
 Envío por Telegram (para despliegue 24/7 en Render, región Frankfurt/Singapore):
     export TELEGRAM_BOT_TOKEN="tu-token-de-botfather"
     export TELEGRAM_CHAT_ID="tu-chat-id"
-    python commodities_smc_analyst.py --interval 60 --watch 60 --telegram
+    python commodities_smc_analyst.py --interval 1H --watch 60 --telegram
 ================================================================================
 """
 import argparse
@@ -69,13 +80,18 @@ import requests
 # ==============================================================================
 # CONFIGURACIÓN (todo ajustable por variables de entorno)
 # ==============================================================================
-BYBIT_BASE_URL = "https://api.bybit.com"
-BYBIT_CATEGORY = os.environ.get("BYBIT_CATEGORY", "linear").strip()
+BITGET_BASE_URL = "https://api.bitget.com"
+BITGET_PRODUCT_TYPE = os.environ.get("BITGET_PRODUCT_TYPE", "usdt-futures").strip()
 
-# Candidatos a probar en vivo. XAUUSDT (oro) y CLUSDT (petróleo WTI) están
-# confirmados como contratos "linear" en Bybit. Los demás son candidatos —
-# el bot salta automáticamente los que no existan (ver Logs).
-DEFAULT_SYMBOLS = "XAUUSDT,XAGUSDT,CLUSDT,XPTUSDT,XPDUSDT,NATGASUSDT,XCUUSDT"
+# Top 10 de materias primas a probar en vivo. CLUSDT (petróleo WTI), BZUSDT
+# (petróleo Brent), NATGASUSDT (gas natural) y XAUUSDT (oro) están
+# confirmados en la documentación pública de Bitget. Plata, platino,
+# paladio, cobre, café y trigo son candidatos razonables (Bitget agrupa
+# "metales preciosos" y "agrícolas" como categorías, pero no publica el
+# símbolo exacto de cada uno) — el bot salta automáticamente los que no
+# existan como contrato USDT-FUTURES (ver Logs de Render para confirmar
+# cuáles quedan activos).
+DEFAULT_SYMBOLS = "XAUUSDT,XAGUSDT,XPTUSDT,XPDUSDT,XCUUSDT,CLUSDT,BZUSDT,NATGASUSDT,COFFEEUSDT,WHEATUSDT"
 SYMBOLS = [s.strip().upper() for s in os.environ.get("SYMBOLS", DEFAULT_SYMBOLS).split(",") if s.strip()]
 
 SWING_ORDER = int(os.environ.get("SWING_ORDER", "4"))
@@ -105,37 +121,54 @@ financiera personalizada, y que los derivados de materias primas suelen operarse
 
 
 # ==============================================================================
-# 1. DESCARGA DE DATOS (Bybit API — misma fuente que el bot de cripto)
+# 1. DESCARGA DE DATOS (Bitget API pública — velas de contratos USDT-FUTURES)
 # ==============================================================================
-def fetch_klines(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFrame:
-    url = f"{BYBIT_BASE_URL}/v5/market/kline"
+# Bitget usa "granularity" con formato de texto (1H, 4H, 1D...) en vez del
+# formato numérico de minutos que usa Bybit. Esta tabla traduce los valores
+# de --interval que ya usan los otros bots de la familia Ridgecrest al
+# formato que espera Bitget, para no tener que cambiar la forma de operar
+# el bot desde Render.
+BITGET_GRANULARITY_MAP = {
+    "1": "1m", "3": "3m", "5": "5m", "15": "15m", "30": "30m",
+    "60": "1H", "120": "4H", "240": "4H", "360": "6H", "720": "12H",
+    "D": "1D", "W": "1W", "M": "1M",
+}
+
+
+def _to_bitget_granularity(interval: str) -> str:
+    return BITGET_GRANULARITY_MAP.get(interval.strip(), interval.strip())
+
+
+def fetch_klines(symbol: str, interval: str = "1H", limit: int = 300) -> pd.DataFrame:
+    url = f"{BITGET_BASE_URL}/api/v2/mix/market/candles"
     params = {
-        "category": BYBIT_CATEGORY,
         "symbol": symbol,
-        "interval": interval,
+        "granularity": _to_bitget_granularity(interval),
         "limit": limit,
+        "productType": BITGET_PRODUCT_TYPE,
     }
     resp = requests.get(url, params=params, timeout=20)
     resp.raise_for_status()
     data = resp.json()
 
-    if data.get("retCode") != 0:
-        raise RuntimeError(f"Bybit API error para {symbol}: {data.get('retMsg', data)}")
+    if data.get("code") != "00000":
+        raise RuntimeError(f"Bitget API error para {symbol}: {data.get('msg', data)}")
 
-    rows = data.get("result", {}).get("list", [])
+    rows = data.get("data", [])
     if not rows:
         raise RuntimeError(
-            f"Bybit no devolvió datos para {symbol} (categoría={BYBIT_CATEGORY}). "
-            f"Es posible que este símbolo no exista como contrato '{BYBIT_CATEGORY}'."
+            f"Bitget no devolvió datos para {symbol} (productType={BITGET_PRODUCT_TYPE}). "
+            f"Es posible que este símbolo no exista como contrato USDT-FUTURES."
         )
 
-    # Bybit devuelve: [start, open, high, low, close, volume, turnover]
-    # en orden descendente (más reciente primero).
-    df = pd.DataFrame(rows, columns=["start", "open", "high", "low", "close", "volume", "turnover"])
+    # Bitget devuelve: [timestamp, open, high, low, close, baseVolume, quoteVolume]
+    df = pd.DataFrame(rows, columns=["start", "open", "high", "low", "close", "volume", "quote_volume"])
     df["timestamp"] = pd.to_datetime(df["start"].astype(np.int64), unit="ms", utc=True)
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
 
+    # Se ordena por las dudas de forma ascendente (más antiguo -> más
+    # reciente), independientemente del orden en que venga de la API.
     df = df.sort_values("timestamp").reset_index(drop=True)
     return df[["timestamp", "open", "high", "low", "close", "volume"]]
 
@@ -751,11 +784,12 @@ def seconds_until_next_aligned_run(watch_minutes: int) -> float:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Analista SMC/ICT de materias primas (Bybit linear)")
+    parser = argparse.ArgumentParser(description="Analista SMC/ICT de materias primas (Bitget USDT-FUTURES)")
     parser.add_argument("--symbols", default=None,
                          help="Lista separada por comas, ej. 'XAUUSDT,CLUSDT'. Si no se especifica, usa SYMBOLS.")
-    parser.add_argument("--interval", default="60",
-                         help="Timeframe de Bybit: 1,3,5,15,30,60,120,240,360,720,D,W,M (minutos salvo D/W/M)")
+    parser.add_argument("--interval", default="1H",
+                         help="Timeframe: 1m,3m,5m,15m,30m,1H,4H,6H,12H,1D,1W,1M "
+                              "(también acepta el formato numérico de Bybit: 60=1H, etc.)")
     parser.add_argument("--limit", type=int, default=300, help="Número de velas a analizar (máx 1000)")
     parser.add_argument("--telegram", action="store_true", help="Envía el reporte a Telegram")
     parser.add_argument("--watch", type=int, default=0, help="Repite cada N minutos (0 = una sola vez)")
@@ -767,7 +801,7 @@ def main():
 
     print(
         "⚠ Herramienta educativa. No ejecuta órdenes ni gestiona fondos. No es asesoría financiera.\n"
-        f"Categoría Bybit: {BYBIT_CATEGORY}\n"
+        f"Fuente de datos: Bitget ({BITGET_PRODUCT_TYPE})\n"
         f"Símbolos candidatos: {', '.join(symbols)}\n"
     )
 
