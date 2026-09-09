@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-KEEP_ALIVE — envoltorio para desplegar commodities_smc_analyst.py en Render (free)
+KEEP_ALIVE — envoltorio para desplegar commodities_smc_analyst.py en Render
 ================================================================================
-Mismo patrón que ya usas en el bot de LTC: lanza el script de análisis como
-proceso hijo y levanta un servidor HTTP mínimo para que UptimeRobot pueda
-hacer ping y Render no duerma el servicio.
+Mismo patrón que los otros bots: lanza el script de análisis como proceso
+hijo y levanta un servidor HTTP mínimo para que UptimeRobot pueda hacer ping
+y Render no duerma el servicio.
+
+IMPORTANTE: este bot usa la API de Bybit, que bloquea IPs de EE. UU. — debe
+desplegarse en la región Frankfurt o Singapore de Render, NUNCA en Ohio.
 
 Uso en el Procfile de Render:
     web: python keep_alive.py
@@ -13,7 +16,9 @@ Uso en el Procfile de Render:
 Variables de entorno relevantes:
     PORT          La asigna Render automáticamente, no hay que tocarla.
     ANALYST_ARGS  Opcional, para cambiar los argumentos sin editar este
-                  archivo, ej. "--interval 1h --watch 30 --telegram"
+                  archivo. IMPORTANTE: el formato de intervalo aquí es
+                  numérico (Bybit), ej. "--interval 60 --watch 60 --telegram"
+                  (NO uses "1h" — eso es formato de Twelve Data, no de Bybit).
 ================================================================================
 """
 import os
@@ -23,7 +28,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-DEFAULT_ARGS = ["--interval", "1h", "--watch", "60", "--telegram"]
+DEFAULT_ARGS = ["--interval", "60", "--watch", "60", "--telegram"]
 
 _last_restart_count = 0
 _lock = threading.Lock()
@@ -54,10 +59,6 @@ def run_analyst_forever():
 
 class PingHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
-        # UptimeRobot y otros monitores a veces usan HEAD en vez de GET.
-        # Sin este método, el servidor respondía 501 Not Implemented y
-        # el monitor marcaba el bot como "caído" aunque siguiera
-        # funcionando por dentro.
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
@@ -66,7 +67,7 @@ class PingHandler(BaseHTTPRequestHandler):
         with _lock:
             restarts = _last_restart_count
         body = (
-            f"commodities-smc-bot activo\n"
+            f"commodities-smc-bot (Bybit) activo\n"
             f"reinicios del analista: {restarts}\n"
             f"hora UTC: {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())}\n"
         ).encode("utf-8")

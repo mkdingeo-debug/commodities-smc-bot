@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-NATHANIEL RIDGE — RIDGECREST COMMODITIES | ANALISTA SMC/ICT MULTI-PAR (Forex)
+NATHANIEL RIDGE — RIDGECREST COMMODITIES | ANALISTA SMC/ICT (vía Bybit)
 ================================================================================
 Asistente de análisis técnico (NO ejecuta órdenes, NO gestiona fondos) basado
 en metodología Smart Money Concepts (SMC) + Price Action + ICT, aplicado a
-pares de Forex. Es el mismo motor de análisis que los bots de criptomonedas y Forex — la
-metodología SMC/ICT se aplica igual sobre cualquier gráfico de precios —
-solo cambia la fuente de datos (Twelve Data) y los símbolos analizados
-(metales preciosos y petróleo).
+contratos "linear" de materias primas listados en Bybit (ej. XAUUSDT = oro,
+CLUSDT = petróleo WTI) — la MISMA API pública que ya usa el bot de
+criptomonedas, sin necesidad de cuenta ni API key de terceros, sin límite de
+llamadas por día, y con velas completas (OHLC) para el análisis SMC/ICT real.
 
-Cubre:
-1. Estructura de mercado: swing highs/lows, BOS y CHoCH.
-2. Liquidez: equal highs / equal lows.
-3. Order Blocks, Breaker Blocks y Fair Value Gaps (FVG).
-4. Premium / Discount Pricing y niveles OTE (0.618 / 0.705 / 0.79).
-5. Plan de trading hipotético: entrada (POI), invalidación (SL), objetivos
-   (TP1/TP2/TP3) y ratio Riesgo:Beneficio, con filtro mínimo de calidad.
-6. Objetivos de extensión Fibonacci (1.272 / 1.618 / 2.0) cuando el precio
-   ya se movió sin retroceso.
+IMPORTANTE: no todos los símbolos candidatos en SYMBOLS están garantizados —
+Bybit solo lista como contrato "linear" un subconjunto de materias primas
+(oro y petróleo confirmados; el resto son candidatos a probar en vivo). El
+bot salta automáticamente cualquier símbolo que no exista, sin afectar a los
+demás — revisa los Logs de Render para ver cuáles funcionan.
+
+Como Bybit bloquea solicitudes desde IPs de EE. UU., este bot DEBE
+desplegarse en una región de Render fuera de EE. UU. (Frankfurt o Singapore),
+igual que se hizo con el bot de cripto.
 
 ------------------------------------------------------------------------------
 AVISO IMPORTANTE / DISCLAIMER
@@ -28,20 +28,18 @@ AVISO IMPORTANTE / DISCLAIMER
 - El "plan de trading" es un ESCENARIO HIPOTÉTICO calculado con reglas
   automatizadas y simplificadas de SMC/ICT. No sustituye el juicio de un
   analista humano ni garantiza resultados.
-- Las materias primas (metales, energéticos) suelen operarse vía CFDs o
-  futuros con apalancamiento: el riesgo de pérdida puede superar el capital
-  depositado. Valida siempre con tu propio análisis
-  y gestión de riesgo antes de operar con dinero real.
+- Los CFDs/derivados de materias primas suelen operarse con apalancamiento:
+  el riesgo de pérdida puede superar el capital depositado.
 ------------------------------------------------------------------------------
 Requisitos:
     pip install requests pandas numpy
 
 Uso básico:
-    python commodities_smc_analyst.py --interval 1h --outputsize 300
+    python commodities_smc_analyst.py --interval 60 --limit 300
 
 Variables de entorno:
-    export TWELVEDATA_API_KEY="tu-api-key-de-twelvedata"
-    export SYMBOLS="XAU/USD,XAG/USD,XPT/USD,XPD/USD,WTI/USD,XBR/USD"
+    export SYMBOLS="XAUUSDT,XAGUSDT,CLUSDT,XPTUSDT,XPDUSDT,NATGASUSDT,XCUUSDT"
+    export BYBIT_CATEGORY="linear"
     export SWING_ORDER=4
     export OB_LOOKBACK=8
     export LIQUIDITY_TOLERANCE_PCT=0.05
@@ -50,10 +48,10 @@ Variables de entorno:
     export VOLUME_LOOKBACK=20
     export VOLUME_ZSCORE_THRESHOLD=2.0
 
-Envío por Telegram (para despliegue 24/7 en Render):
+Envío por Telegram (para despliegue 24/7 en Render, región Frankfurt/Singapore):
     export TELEGRAM_BOT_TOKEN="tu-token-de-botfather"
     export TELEGRAM_CHAT_ID="tu-chat-id"
-    python commodities_smc_analyst.py --interval 1h --watch 60 --telegram
+    python commodities_smc_analyst.py --interval 60 --watch 60 --telegram
 ================================================================================
 """
 import argparse
@@ -71,10 +69,13 @@ import requests
 # ==============================================================================
 # CONFIGURACIÓN (todo ajustable por variables de entorno)
 # ==============================================================================
-TWELVEDATA_BASE_URL = "https://api.twelvedata.com"
-TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "").strip()
+BYBIT_BASE_URL = "https://api.bybit.com"
+BYBIT_CATEGORY = os.environ.get("BYBIT_CATEGORY", "linear").strip()
 
-DEFAULT_SYMBOLS = "XAU/USD,XAG/USD,XPT/USD,XPD/USD,WTI/USD,XBR/USD"
+# Candidatos a probar en vivo. XAUUSDT (oro) y CLUSDT (petróleo WTI) están
+# confirmados como contratos "linear" en Bybit. Los demás son candidatos —
+# el bot salta automáticamente los que no existan (ver Logs).
+DEFAULT_SYMBOLS = "XAUUSDT,XAGUSDT,CLUSDT,XPTUSDT,XPDUSDT,NATGASUSDT,XCUUSDT"
 SYMBOLS = [s.strip().upper() for s in os.environ.get("SYMBOLS", DEFAULT_SYMBOLS).split(",") if s.strip()]
 
 SWING_ORDER = int(os.environ.get("SWING_ORDER", "4"))
@@ -85,71 +86,56 @@ RSI_PERIOD = int(os.environ.get("RSI_PERIOD", "14"))
 VOLUME_LOOKBACK = int(os.environ.get("VOLUME_LOOKBACK", "20"))
 VOLUME_ZSCORE_THRESHOLD = float(os.environ.get("VOLUME_ZSCORE_THRESHOLD", "2.0"))
 
-# Pausa entre llamadas a la API para no exceder el límite gratuito de Twelve
-# Data (8 llamadas por minuto). 8 segundos de pausa = máx 7.5 llamadas/min,
-# con margen de seguridad.
-API_CALL_DELAY_SECONDS = float(os.environ.get("API_CALL_DELAY_SECONDS", "8"))
+API_CALL_DELAY_SECONDS = float(os.environ.get("API_CALL_DELAY_SECONDS", "1"))
 
 DEPLOY_LABEL = os.environ.get("DEPLOY_LABEL", "").strip()
 
-OTE_LEVELS = (0.618, 0.705, 0.79)  # niveles institucionales de retroceso (ICT OTE)
+OTE_LEVELS = (0.618, 0.705, 0.79)
 
 ANALYST_PERSONA = """
-Eres Nathaniel Ridge, analista principal de Ridgecrest Commodities, trader institucional y analista de finanzas con más de 20
-años de experiencia en mercados financieros (Wall Street 1996-2013, Forex y
-cripto 2013-presente). Eres especialista de alto nivel en Smart Money
-Concepts (SMC), Price Action e ICT (Inner Circle Trader) — metodología que
-nació precisamente en el trading de divisas institucional. Tu análisis es
-riguroso, objetivo y directo: identificas la huella de las instituciones
-(liquidez, order blocks, desequilibrios) y evitas términos imprecisos o
-lenguaje de hype. Presentas siempre: estructura y sesgo, liquidez, zonas de
-oferta y demanda, un plan de trading hipotético con entrada/invalidación/
-objetivos/ratio riesgo:beneficio, y una nota de gestión de riesgo. Aclaras
-siempre que esto es un escenario técnico automatizado, no asesoría
-financiera personalizada, y que el apalancamiento típico de Forex amplifica
-tanto ganancias como pérdidas.
+Eres Nathaniel Ridge, analista principal de Ridgecrest Commodities, trader institucional y analista de finanzas con
+más de 20 años de experiencia en mercados financieros. Eres especialista de alto nivel en Smart Money Concepts
+(SMC), Price Action e ICT (Inner Circle Trader) aplicado a materias primas (metales preciosos, energéticos).
+Tu análisis es riguroso, objetivo y directo: identificas la huella de las instituciones (liquidez, order blocks,
+desequilibrios) y evitas términos imprecisos o lenguaje de hype. Presentas siempre: estructura y sesgo, liquidez,
+zonas de oferta y demanda, un plan de trading hipotético con entrada/invalidación/objetivos/ratio riesgo:beneficio,
+y una nota de gestión de riesgo. Aclaras siempre que esto es un escenario técnico automatizado, no asesoría
+financiera personalizada, y que los derivados de materias primas suelen operarse con apalancamiento.
 """
 
 
 # ==============================================================================
-# 1. DESCARGA DE DATOS (Twelve Data API)
+# 1. DESCARGA DE DATOS (Bybit API — misma fuente que el bot de cripto)
 # ==============================================================================
-def fetch_klines(symbol: str, interval: str = "1h", outputsize: int = 300) -> pd.DataFrame:
-    if not TWELVEDATA_API_KEY:
-        raise RuntimeError(
-            "Falta la variable de entorno TWELVEDATA_API_KEY. "
-            "Consíguela gratis en https://twelvedata.com/register"
-        )
-    url = f"{TWELVEDATA_BASE_URL}/time_series"
+def fetch_klines(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFrame:
+    url = f"{BYBIT_BASE_URL}/v5/market/kline"
     params = {
+        "category": BYBIT_CATEGORY,
         "symbol": symbol,
         "interval": interval,
-        "outputsize": outputsize,
-        "apikey": TWELVEDATA_API_KEY,
+        "limit": limit,
     }
     resp = requests.get(url, params=params, timeout=20)
     resp.raise_for_status()
     data = resp.json()
 
-    if data.get("status") == "error" or "values" not in data:
-        raise RuntimeError(f"Twelve Data API error para {symbol}: {data.get('message', data)}")
+    if data.get("retCode") != 0:
+        raise RuntimeError(f"Bybit API error para {symbol}: {data.get('retMsg', data)}")
 
-    rows = data["values"]
+    rows = data.get("result", {}).get("list", [])
     if not rows:
-        raise RuntimeError(f"Twelve Data no devolvió datos para {symbol}. Revisa símbolo/intervalo.")
+        raise RuntimeError(
+            f"Bybit no devolvió datos para {symbol} (categoría={BYBIT_CATEGORY}). "
+            f"Es posible que este símbolo no exista como contrato '{BYBIT_CATEGORY}'."
+        )
 
-    df = pd.DataFrame(rows)
-    df["timestamp"] = pd.to_datetime(df["datetime"], utc=True)
-    for col in ["open", "high", "low", "close"]:
+    # Bybit devuelve: [start, open, high, low, close, volume, turnover]
+    # en orden descendente (más reciente primero).
+    df = pd.DataFrame(rows, columns=["start", "open", "high", "low", "close", "volume", "turnover"])
+    df["timestamp"] = pd.to_datetime(df["start"].astype(np.int64), unit="ms", utc=True)
+    for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
-    # Forex spot no siempre trae volumen real; si falta, se rellena con 0 y
-    # la alerta de flujo de capital simplemente no dispara (comportamiento
-    # seguro, ver detect_capital_flow_alert).
-    df["volume"] = df["volume"].astype(float) if "volume" in df.columns else 0.0
 
-    # Twelve Data devuelve normalmente lo más reciente primero; lo ordenamos
-    # de forma ascendente (más antiguo -> más reciente) para el resto del
-    # motor de análisis.
     df = df.sort_values("timestamp").reset_index(drop=True)
     return df[["timestamp", "open", "high", "low", "close", "volume"]]
 
@@ -315,7 +301,7 @@ def find_liquidity_pools(swings: List[SwingPoint], tolerance_pct: float = LIQUID
                 zones.append(Zone(
                     f"liquidity_{kind}", top=avg_price, bottom=avg_price,
                     index=cluster[-1].index, timestamp=cluster[-1].timestamp,
-                    note=f"{len(cluster)} equal {kind}s agrupados cerca de {avg_price:.5f} "
+                    note=f"{len(cluster)} equal {kind}s agrupados cerca de {avg_price:.4f} "
                          f"(liquidez minorista — posible objetivo de barrido)",
                 ))
     return zones
@@ -349,12 +335,12 @@ def compute_premium_discount(df: pd.DataFrame, swings: List[SwingPoint]) -> Opti
     pct = (price - range_low) / rng
     if pct > 1.0:
         extra = price - range_high
-        zone = (f"EXTENSIÓN ALCISTA — {extra:.5f} por encima del último swing high "
-                f"confirmado ({range_high:.5f}), equivalente al {(pct - 1) * 100:.0f}% del rango")
+        zone = (f"EXTENSIÓN ALCISTA — {extra:.4f} por encima del último swing high "
+                f"confirmado ({range_high:.4f}), equivalente al {(pct - 1) * 100:.0f}% del rango")
     elif pct < 0.0:
         extra = range_low - price
-        zone = (f"EXTENSIÓN BAJISTA — {extra:.5f} por debajo del último swing low "
-                f"confirmado ({range_low:.5f}), equivalente al {(-pct) * 100:.0f}% del rango")
+        zone = (f"EXTENSIÓN BAJISTA — {extra:.4f} por debajo del último swing low "
+                f"confirmado ({range_low:.4f}), equivalente al {(-pct) * 100:.0f}% del rango")
     elif pct < 0.45:
         zone = "descuento (discount)"
     elif pct > 0.55:
@@ -402,14 +388,12 @@ def calculate_rsi(df: pd.DataFrame, period: int = RSI_PERIOD) -> float:
 
 
 # ==============================================================================
-# 6. ALERTA DE FLUJO DE CAPITAL (anomalía de volumen, si el bróker la reporta)
+# 6. ALERTA DE FLUJO DE CAPITAL (anomalía de volumen)
 # ==============================================================================
 def detect_capital_flow_alert(df: pd.DataFrame, lookback: int = VOLUME_LOOKBACK,
                                z_threshold: float = VOLUME_ZSCORE_THRESHOLD) -> Optional[str]:
     vol = df["volume"]
     if len(vol) < lookback + 1 or vol.sum() == 0:
-        # Forex spot muchas veces no reporta volumen real; sin datos de
-        # volumen, esta alerta simplemente no se genera (no es un error).
         return None
     recent = vol.iloc[-(lookback + 1):-1]
     mean, std = recent.mean(), recent.std()
@@ -471,7 +455,7 @@ def compute_trade_plan(bias: str, price: float, pd_info: Optional[PremiumDiscoun
         )
         if targets and (targets[0].top - entry_mid) <= max_tp1_distance:
             tp1 = targets[0].top
-            tp1_source = f"liquidez en {tp1:.5f}"
+            tp1_source = f"liquidez en {tp1:.4f}"
         else:
             tp1 = pd_info.range_high
         tp2 = pd_info.range_high
@@ -485,7 +469,7 @@ def compute_trade_plan(bias: str, price: float, pd_info: Optional[PremiumDiscoun
         )
         if targets and (entry_mid - targets[0].bottom) <= max_tp1_distance:
             tp1 = targets[0].bottom
-            tp1_source = f"liquidez en {tp1:.5f}"
+            tp1_source = f"liquidez en {tp1:.4f}"
         else:
             tp1 = pd_info.range_low
         tp2 = pd_info.range_low
@@ -633,12 +617,12 @@ def render_template_report(report: SignalReport, interval: str) -> str:
         L.append("")
 
     L.append("1) ESTRUCTURA Y SESGO")
-    L.append(f"   Precio: {report.price:.5f} | Sesgo: {report.bias.upper()} | Confianza: {report.confidence}")
+    L.append(f"   Precio: {report.price:.4f} | Sesgo: {report.bias.upper()} | Confianza: {report.confidence}")
     L.append(f"   RSI({RSI_PERIOD}): {report.rsi_note}")
     if report.last_event:
-        L.append(f"   Último evento: {report.last_event.kind} en {report.last_event.price:.5f} "
+        L.append(f"   Último evento: {report.last_event.kind} en {report.last_event.price:.4f} "
                   f"({report.last_event.timestamp:%m-%d %H:%M})")
-        L.append(f"   Invalidación de esta lectura: {report.invalidation:.5f}")
+        L.append(f"   Invalidación de esta lectura: {report.invalidation:.4f}")
     else:
         L.append("   Sin eventos de estructura claros todavía.")
 
@@ -646,9 +630,9 @@ def render_template_report(report: SignalReport, interval: str) -> str:
         pd_i = report.premium_discount
         L.append("")
         L.append("2) PREMIUM / DISCOUNT (ICT)")
-        L.append(f"   Rango activo (último swing): {pd_i.range_low:.5f} — {pd_i.range_high:.5f}")
+        L.append(f"   Rango activo (último swing): {pd_i.range_low:.4f} — {pd_i.range_high:.4f}")
         L.append(f"   Precio: {pd_i.zone}")
-        levels_txt = " | ".join(f"{fib}: {p:.5f}" for fib, p in pd_i.ote_levels.items())
+        levels_txt = " | ".join(f"{fib}: {p:.4f}" for fib, p in pd_i.ote_levels.items())
         L.append(f"   Niveles OTE: {levels_txt}")
 
     L.append("")
@@ -663,22 +647,22 @@ def render_template_report(report: SignalReport, interval: str) -> str:
     L.append("4) OFERTA / DEMANDA (Order Blocks & FVG)")
     if report.ob_zones:
         for z in report.ob_zones:
-            L.append(f"   - [{z.kind}] {z.bottom:.5f}-{z.top:.5f} | {z.note}")
+            L.append(f"   - [{z.kind}] {z.bottom:.4f}-{z.top:.4f} | {z.note}")
     else:
         L.append("   - Sin Order Blocks no mitigados relevantes.")
     if report.fvg_zones:
         for z in report.fvg_zones:
-            L.append(f"   - [{z.kind}] {z.bottom:.5f}-{z.top:.5f}")
+            L.append(f"   - [{z.kind}] {z.bottom:.4f}-{z.top:.4f}")
 
     if report.trade_plan:
         tp = report.trade_plan
         L.append("")
         L.append("5) PLAN DE TRADING HIPOTÉTICO")
-        L.append(f"   Entrada (POI): {tp.entry_low:.5f} — {tp.entry_high:.5f}")
-        L.append(f"   Invalidación (SL): {tp.stop_loss:.5f}")
-        L.append(f"   TP1: {tp.take_profit_1:.5f} (R:R {tp.rr1:.2f}) — fuente: {tp.tp1_source}")
-        L.append(f"   TP2: {tp.take_profit_2:.5f} (R:R {tp.rr2:.2f})")
-        L.append(f"   TP3: {tp.take_profit_3:.5f} (R:R {tp.rr3:.2f})")
+        L.append(f"   Entrada (POI): {tp.entry_low:.4f} — {tp.entry_high:.4f}")
+        L.append(f"   Invalidación (SL): {tp.stop_loss:.4f}")
+        L.append(f"   TP1: {tp.take_profit_1:.4f} (R:R {tp.rr1:.2f}) — fuente: {tp.tp1_source}")
+        L.append(f"   TP2: {tp.take_profit_2:.4f} (R:R {tp.rr2:.2f})")
+        L.append(f"   TP3: {tp.take_profit_3:.4f} (R:R {tp.rr3:.2f})")
     elif report.extension_targets:
         L.append("")
         L.append("5) OBJETIVOS DE EXTENSIÓN (movimiento fuerte, sin retroceso aún)")
@@ -686,7 +670,7 @@ def render_template_report(report: SignalReport, interval: str) -> str:
                   "entrar ahora implica peor R:R y mayor riesgo de reversión. Estos son "
                   "niveles de referencia por si el movimiento continúa:")
         for ratio, level in report.extension_targets.items():
-            L.append(f"   Extensión {ratio}: {level:.5f}")
+            L.append(f"   Extensión {ratio}: {level:.4f}")
         L.append("   Si buscas entrar, lo prudente es esperar un retroceso hacia las zonas "
                   "de la sección 4, no perseguir el precio aquí.")
     else:
@@ -700,8 +684,8 @@ def render_template_report(report: SignalReport, interval: str) -> str:
     L.append("")
     L.append(
         "⚠ Escenario técnico automatizado (SMC/ICT simplificado). No es asesoría "
-        "financiera ni garantía de resultados. El apalancamiento en CFDs/futuros de materias primas amplifica "
-        "ganancias y pérdidas. Define tu propia gestión de riesgo."
+        "financiera ni garantía de resultados. Los derivados de materias primas "
+        "suelen operarse con apalancamiento. Define tu propia gestión de riesgo."
     )
     return "\n".join(L)
 
@@ -731,8 +715,8 @@ def send_telegram_message(text: str) -> None:
 # ==============================================================================
 # 11. CLI
 # ==============================================================================
-def analyze_symbol(symbol: str, interval: str, outputsize: int) -> str:
-    df = fetch_klines(symbol=symbol, interval=interval, outputsize=outputsize)
+def analyze_symbol(symbol: str, interval: str, limit: int) -> str:
+    df = fetch_klines(symbol=symbol, interval=interval, limit=limit)
     swings = find_swing_points(df)
     events = detect_structure_events(swings)
     zones = []
@@ -744,17 +728,15 @@ def analyze_symbol(symbol: str, interval: str, outputsize: int) -> str:
     return render_template_report(report, interval)
 
 
-def run_once(symbols: List[str], interval: str, outputsize: int, use_telegram: bool) -> None:
+def run_once(symbols: List[str], interval: str, limit: int, use_telegram: bool) -> None:
     for i, symbol in enumerate(symbols):
         try:
-            text = analyze_symbol(symbol, interval, outputsize)
+            text = analyze_symbol(symbol, interval, limit)
             print(text)
             if use_telegram:
                 send_telegram_message(text)
         except Exception as exc:
             print(f"[Error analizando {symbol}] {exc}")
-        # Respeta el límite de 8 llamadas/min del plan gratuito de Twelve
-        # Data, salvo en el último símbolo del lote.
         if i < len(symbols) - 1:
             time.sleep(API_CALL_DELAY_SECONDS)
 
@@ -769,12 +751,12 @@ def seconds_until_next_aligned_run(watch_minutes: int) -> float:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Analista SMC/ICT multi-par de Forex (Twelve Data)")
+    parser = argparse.ArgumentParser(description="Analista SMC/ICT de materias primas (Bybit linear)")
     parser.add_argument("--symbols", default=None,
-                         help="Lista separada por comas, ej. 'EUR/USD,GBP/USD'. Si no se especifica, usa SYMBOLS.")
-    parser.add_argument("--interval", default="1h",
-                         help="Timeframe de Twelve Data: 1min,5min,15min,30min,45min,1h,2h,4h,1day,1week,1month")
-    parser.add_argument("--outputsize", type=int, default=300, help="Número de velas a analizar (máx ~5000)")
+                         help="Lista separada por comas, ej. 'XAUUSDT,CLUSDT'. Si no se especifica, usa SYMBOLS.")
+    parser.add_argument("--interval", default="60",
+                         help="Timeframe de Bybit: 1,3,5,15,30,60,120,240,360,720,D,W,M (minutos salvo D/W/M)")
+    parser.add_argument("--limit", type=int, default=300, help="Número de velas a analizar (máx 1000)")
     parser.add_argument("--telegram", action="store_true", help="Envía el reporte a Telegram")
     parser.add_argument("--watch", type=int, default=0, help="Repite cada N minutos (0 = una sola vez)")
     parser.add_argument("--no-align", action="store_true",
@@ -785,11 +767,12 @@ def main():
 
     print(
         "⚠ Herramienta educativa. No ejecuta órdenes ni gestiona fondos. No es asesoría financiera.\n"
-        f"Pares: {', '.join(symbols)}\n"
+        f"Categoría Bybit: {BYBIT_CATEGORY}\n"
+        f"Símbolos candidatos: {', '.join(symbols)}\n"
     )
 
     if args.watch <= 0:
-        run_once(symbols, args.interval, args.outputsize, args.telegram)
+        run_once(symbols, args.interval, args.limit, args.telegram)
         return
 
     while True:
@@ -800,7 +783,7 @@ def main():
                 print(f"Esperando {mins} min para alinear el próximo reporte a un horario redondo...\n")
                 time.sleep(wait)
         try:
-            run_once(symbols, args.interval, args.outputsize, args.telegram)
+            run_once(symbols, args.interval, args.limit, args.telegram)
         except KeyboardInterrupt:
             print("\nDetenido por el usuario.")
             sys.exit(0)
