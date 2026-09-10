@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-KEEP_ALIVE — envoltorio para desplegar commodities_smc_analyst.py en Render
+KEEP_ALIVE — envoltorio para desplegar commodities_smc_analyst.py en Render (free)
 ================================================================================
-Mismo patrón que los otros bots: lanza el script de análisis como proceso
-hijo y levanta un servidor HTTP mínimo para que UptimeRobot pueda hacer ping
-y Render no duerma el servicio.
+Lanza el script de análisis como proceso hijo y levanta un servidor HTTP
+mínimo para que UptimeRobot pueda hacer ping y Render no duerma el servicio.
 
-IMPORTANTE: este bot usa la API de Bybit, que bloquea IPs de EE. UU. — debe
-desplegarse en la región Frankfurt o Singapore de Render, NUNCA en Ohio.
+IMPORTANTE (corrección aplicada): se lanza el proceso hijo con la opción
+-u (salida sin buffer). Sin esto, los mensajes de print() del bot pueden
+quedar "atascados" en un buffer interno y no aparecer en los Logs de
+Render hasta que se acumula suficiente texto o el proceso termina — dando
+la falsa impresión de que el bot está colgado cuando en realidad sigue
+trabajando por dentro.
 
 Uso en el Procfile de Render:
     web: python keep_alive.py
@@ -16,9 +19,7 @@ Uso en el Procfile de Render:
 Variables de entorno relevantes:
     PORT          La asigna Render automáticamente, no hay que tocarla.
     ANALYST_ARGS  Opcional, para cambiar los argumentos sin editar este
-                  archivo. IMPORTANTE: el formato de intervalo aquí es
-                  numérico (Bybit), ej. "--interval 60 --watch 60 --telegram"
-                  (NO uses "1h" — eso es formato de Twelve Data, no de Bybit).
+                  archivo, ej. "--interval 60 --watch 60 --telegram"
 ================================================================================
 """
 import os
@@ -37,7 +38,9 @@ _lock = threading.Lock()
 def build_analyst_cmd():
     custom = os.environ.get("ANALYST_ARGS", "").strip()
     args = custom.split() if custom else DEFAULT_ARGS
-    return [sys.executable, "commodities_smc_analyst.py", *args]
+    # "-u" = salida sin buffer, para que los print() del bot aparezcan en
+    # los Logs de Render al instante, en vez de quedar retenidos.
+    return [sys.executable, "-u", "commodities_smc_analyst.py", *args]
 
 
 def run_analyst_forever():
@@ -67,7 +70,7 @@ class PingHandler(BaseHTTPRequestHandler):
         with _lock:
             restarts = _last_restart_count
         body = (
-            f"commodities-smc-bot (Bybit) activo\n"
+            f"commodities-smc-bot activo\n"
             f"reinicios del analista: {restarts}\n"
             f"hora UTC: {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())}\n"
         ).encode("utf-8")
